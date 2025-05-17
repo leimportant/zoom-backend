@@ -152,13 +152,19 @@ func CreateMeeting(c *gin.Context) {
 
 // UpdateMeeting - Update Zoom meeting dan DB
 func UpdateMeeting(c *gin.Context) {
-	id := c.Param("id")
+	id := c.Param("id") // Zoom Meeting ID langsung dari URL, misal "74372059854"
 
-	// Bind input JSON ke struct
+	var zoomMeetingID string
+	err := database.DB.QueryRow("SELECT zoom_id FROM zoom_meetings WHERE id = ?", id).Scan(&zoomMeetingID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Meeting not found"})
+		return
+	}
+	// Bind input JSON
 	var input struct {
 		Topic     string `json:"topic" binding:"required"`
 		Agenda    string `json:"agenda"`
-		StartTime string `json:"start_time" binding:"required"`
+		StartTime string `json:"start_time" binding:"required"` // Harus RFC3339 format
 		Duration  int    `json:"duration" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -166,11 +172,9 @@ func UpdateMeeting(c *gin.Context) {
 		return
 	}
 
-	token := services.GetAccessToken()
+	token := services.GetAccessToken() // Ambil token JWT
 
-	fmt.Println("token :", token)
-
-	zoomURL := fmt.Sprintf("https://api.zoom.us/v2/meetings/%s", id)
+	zoomURL := fmt.Sprintf("https://api.zoom.us/v2/meetings/%s", zoomMeetingID)
 
 	updateBody := map[string]interface{}{
 		"topic":      input.Topic,
@@ -202,14 +206,14 @@ func UpdateMeeting(c *gin.Context) {
 
 	if resp.StatusCode != 204 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		log.Printf("Zoom API error response: %s\n", string(bodyBytes))
+		log.Printf("Zoom API error response (status %d): %s\n", resp.StatusCode, string(bodyBytes))
 		c.JSON(resp.StatusCode, gin.H{"error": string(bodyBytes)})
 		return
 	}
 
-	// Update di database MySQL
-	_, err = database.DB.Exec(`UPDATE meetings SET topic=?, agenda=?, start_time=?, duration=? WHERE id=?`,
-		input.Topic, input.Agenda, input.StartTime, input.Duration, id)
+	// Kalau perlu, update data meeting di database kamu pakai ZoomMeetingID
+	_, err = database.DB.Exec(`UPDATE zoom_meetings SET topic=?, agenda=?, start_time=?, duration=? WHERE id=?`,
+		input.Topic, input.Agenda, input.StartTime, input.Duration, zoomMeetingID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update meeting in database"})
 		return
@@ -231,7 +235,8 @@ func DeleteMeeting(c *gin.Context) {
 
 	token := services.GetAccessToken()
 
-	req, err := http.NewRequest("DELETE", os.Getenv("ZOOM_API_URL")+"/meetings/"+string(rune(zoomID)), nil)
+	zoomURL := fmt.Sprintf("%s/meetings/%d", os.Getenv("ZOOM_API_URL"), zoomID)
+	req, err := http.NewRequest("DELETE", zoomURL, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
 		return
@@ -247,16 +252,18 @@ func DeleteMeeting(c *gin.Context) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusNoContent {
-		c.JSON(resp.StatusCode, gin.H{"error": "Zoom API error"})
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		log.Printf("Zoom API error response (status %d): %s\n", resp.StatusCode, string(bodyBytes))
+		c.JSON(resp.StatusCode, gin.H{"error": "Failed to delete meeting from Zoom API"})
 		return
 	}
 
 	_, err = database.DB.Exec("DELETE FROM zoom_meetings WHERE id = ?", id)
 	if err != nil {
 		log.Println("DB delete error:", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete meeting"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete meeting from database"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Meeting deleted"})
+	c.JSON(http.StatusOK, gin.H{"message": "Meeting deleted successfully"})
 }
